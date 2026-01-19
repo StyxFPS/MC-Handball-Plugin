@@ -1,0 +1,595 @@
+package com.example.handball;
+
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.plugin.java.JavaPlugin;
+
+public final class HandballPlugin extends JavaPlugin {
+
+    private HandballManager manager;
+
+    @Override
+    public void onEnable() {
+        saveDefaultConfig();
+        manager = new HandballManager(this);
+        Bukkit.getPluginManager().registerEvents(manager, this);
+
+        getCommand("handball").setExecutor(new HandballCommand(manager));
+        getCommand("hbadmin").setExecutor(new AdminCommand(manager));
+
+        getLogger().info("Handball enabled.");
+    }
+
+    @Override
+    public void onDisable() {
+        if (manager != null) manager.shutdown();
+        getLogger().info("Handball disabled.");
+    }
+
+    public Location getLobbyLocation() {
+        return new Location(
+                Bukkit.getWorld(getConfig().getString("lobby.world")),
+                getConfig().getDouble("lobby.x"),
+                getConfig().getDouble("lobby.y"),
+                getConfig().getDouble("lobby.z"),
+                (float) getConfig().getDouble("lobby.yaw"),
+                (float) getConfig().getDouble("lobby.pitch")
+        );
+    }
+
+    public HandballManager getHandballManager() {
+        return manager;
+    }
+}
+package com.example.handball;
+
+import org.bukkit.Bukkit;
+import org.bukkit.ChatColor;
+import org.bukkit.Location;
+import org.bukkit.entity.Player;
+import org.bukkit.scoreboard.*;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.*;
+
+public class HandballManager implements org.bukkit.event.Listener {
+
+    private final HandballPlugin plugin;
+    private final Map<String, Arena> arenas = new HashMap<>();
+    private final Map<UUID, String> playerArena = new HashMap<>();
+    private final Map<String, GameSession> sessions = new HashMap<>();
+
+    public HandballManager(HandballPlugin plugin) {
+        this.plugin = plugin;
+        loadArenas();
+    }
+
+    public void shutdown() {
+        for (GameSession s : sessions.values()) s.stop();
+        sessions.clear();
+    }
+
+    public void loadArenas() {
+        File dir = new File(plugin.getDataFolder(), "arenas");
+        if (!dir.exists()) dir.mkdirs();
+
+        for (File f : Objects.requireNonNull(dir.listFiles((d, name) -> name.endsWith(".yml")))) {
+            try {
+                Arena a = Arena.load(plugin, f);
+                arenas.put(a.getName(), a);
+            } catch (Exception e) {
+                plugin.getLogger().warning("Failed to load arena: " + f.getName());
+            }
+        }
+    }
+
+    public void saveArena(Arena arena) throws IOException {
+        arena.save(plugin);
+        arenas.put(arena.getName(), arena);
+    }
+
+    public Arena getArena(String name) {
+        return arenas.get(name.toLowerCase());
+    }
+
+    public Collection<Arena> getArenas() {
+        return arenas.values();
+    }
+
+    public GameSession getSession(String arenaName) {
+        return sessions.get(arenaName.toLowerCase());
+    }
+
+    public GameSession createSession(Arena arena) {
+        String key = arena.getName().toLowerCase();
+        return sessions.computeIfAbsent(key, k -> new GameSession(plugin, arena));
+    }
+
+    public void removeSession(String arenaName) {
+        sessions.remove(arenaName.toLowerCase());
+    }
+
+    public boolean isInGame(Player p) {
+        return playerArena.containsKey(p.getUniqueId());
+    }
+
+    public Arena getPlayerArena(Player p) {
+        String name = playerArena.get(p.getUniqueId());
+        return name == null ? null : arenas.get(name);
+    }
+
+    public void joinArena(Player p, Arena arena) {
+        if (isInGame(p)) {
+            p.sendMessage(ChatColor.RED + "You are already in a handball game.");
+            return;
+        }
+        GameSession session = createSession(arena);
+        session.addPlayer(p);
+        playerArena.put(p.getUniqueId(), arena.getName().toLowerCase());
+    }
+
+    public void leave(Player p) {
+        if (!isInGame(p)) {
+            p.sendMessage(ChatColor.RED + "You are not in a handball game.");
+            return;
+        }
+        String arenaName = playerArena.remove(p.getUniqueId());
+        GameSession session = sessions.get(arenaName);
+        if (session != null) session.removePlayer(p);
+    }
+
+    public HandballPlugin getPlugin() {
+        return plugin;
+    }
+}
+package com.example.handball;
+
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.configuration.file.YamlConfiguration;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.Locale;
+
+public class Arena {
+    private final String name;
+    private Location lobby;
+    private Location redSpawn;
+    private Location blueSpawn;
+    private Location redGoal;
+    private Location blueGoal;
+
+    public Arena(String name) {
+        this.name = name.toLowerCase(Locale.ROOT);
+    }
+
+    public String getName() { return name; }
+
+    public Location getLobby() { return lobby; }
+    public Location getRedSpawn() { return redSpawn; }
+    public Location getBlueSpawn() { return blueSpawn; }
+    public Location getRedGoal() { return redGoal; }
+    public Location getBlueGoal() { return blueGoal; }
+
+    public void setLobby(Location lobby) { this.lobby = lobby; }
+    public void setRedSpawn(Location redSpawn) { this.redSpawn = redSpawn; }
+    public void setBlueSpawn(Location blueSpawn) { this.blueSpawn = blueSpawn; }
+    public void setRedGoal(Location redGoal) { this.redGoal = redGoal; }
+    public void setBlueGoal(Location blueGoal) { this.blueGoal = blueGoal; }
+
+    public void save(HandballPlugin plugin) throws IOException {
+        File dir = new File(plugin.getDataFolder(), "arenas");
+        if (!dir.exists()) dir.mkdirs();
+        File f = new File(dir, name + ".yml");
+        YamlConfiguration c = new YamlConfiguration();
+        c.set("name", name);
+        if (lobby != null) c.set("lobby", locToString(lobby));
+        if (redSpawn != null) c.set("redSpawn", locToString(redSpawn));
+        if (blueSpawn != null) c.set("blueSpawn", locToString(blueSpawn));
+        if (redGoal != null) c.set("redGoal", locToString(redGoal));
+        if (blueGoal != null) c.set("blueGoal", locToString(blueGoal));
+        c.save(f);
+    }
+
+    public static Arena load(HandballPlugin plugin, File f) {
+        YamlConfiguration c = YamlConfiguration.loadConfiguration(f);
+        String name = c.getString("name", f.getName().replace(".yml", ""));
+        Arena a = new Arena(name);
+        if (c.contains("lobby")) a.setLobby(stringToLoc(c.getString("lobby")));
+        if (c.contains("redSpawn")) a.setRedSpawn(stringToLoc(c.getString("redSpawn")));
+        if (c.contains("blueSpawn")) a.setBlueSpawn(stringToLoc(c.getString("blueSpawn")));
+        if (c.contains("redGoal")) a.setRedGoal(stringToLoc(c.getString("redGoal")));
+        if (c.contains("blueGoal")) a.setBlueGoal(stringToLoc(c.getString("blueGoal")));
+        return a;
+    }
+
+    private static String locToString(Location loc) {
+        return loc.getWorld().getName() + "," + loc.getX() + "," + loc.getY() + "," + loc.getZ() + "," + loc.getYaw() + "," + loc.getPitch();
+    }
+
+    private static Location stringToLoc(String s) {
+        String[] p = s.split(",");
+        return new Location(
+                Bukkit.getWorld(p[0]),
+                Double.parseDouble(p[1]),
+                Double.parseDouble(p[2]),
+                Double.parseDouble(p[3]),
+                Float.parseFloat(p[4]),
+                Float.parseFloat(p[5])
+        );
+    }
+}
+package com.example.handball;
+
+import org.bukkit.*;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.scoreboard.*;
+
+import java.util.*;
+
+public class GameSession implements org.bukkit.event.Listener {
+
+    private final HandballPlugin plugin;
+    private final Arena arena;
+
+    private final Set<UUID> red = new HashSet<>();
+    private final Set<UUID> blue = new HashSet<>();
+
+    private int redScore = 0;
+    private int blueScore = 0;
+
+    private boolean running = false;
+
+    private Scoreboard scoreboard;
+    private Objective objective;
+
+    public GameSession(HandballPlugin plugin, Arena arena) {
+        this.plugin = plugin;
+        this.arena = arena;
+        Bukkit.getPluginManager().registerEvents(this, plugin);
+        setupScoreboard();
+    }
+
+    private void setupScoreboard() {
+        ScoreboardManager mgr = Bukkit.getScoreboardManager();
+        scoreboard = mgr.getNewScoreboard();
+        Team redTeam = scoreboard.registerNewTeam("handball_red");
+        Team blueTeam = scoreboard.registerNewTeam("handball_blue");
+
+        redTeam.setColor(ChatColor.RED);
+        blueTeam.setColor(ChatColor.BLUE);
+
+        objective = scoreboard.registerNewObjective("handball_score", "dummy", ChatColor.GOLD + "Handball");
+        objective.setDisplaySlot(DisplaySlot.SIDEBAR);
+        objective.getScore("Red:").setScore(redScore);
+        objective.getScore("Blue:").setScore(blueScore);
+    }
+
+    public Arena getArena() { return arena; }
+
+    public boolean isRunning() { return running; }
+
+    public void addPlayer(Player p) {
+        if (red.size() <= blue.size()) {
+            red.add(p.getUniqueId());
+            scoreboard.getTeam("handball_red").addEntry(p.getName());
+            p.sendMessage(ChatColor.RED + "You joined Red team.");
+            teleportToSpawn(p, arena.getRedSpawn());
+        } else {
+            blue.add(p.getUniqueId());
+            scoreboard.getTeam("handball_blue").addEntry(p.getName());
+            p.sendMessage(ChatColor.BLUE + "You joined Blue team.");
+            teleportToSpawn(p, arena.getBlueSpawn());
+        }
+        p.setScoreboard(scoreboard);
+        updateScoreboard();
+    }
+
+    public void removePlayer(Player p) {
+        red.remove(p.getUniqueId());
+        blue.remove(p.getUniqueId());
+        scoreboard.getTeam("handball_red").removeEntry(p.getName());
+        scoreboard.getTeam("handball_blue").removeEntry(p.getName());
+        p.setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
+        p.sendMessage(ChatColor.YELLOW + "You left the handball game.");
+        if (arena.getLobby() != null) teleportToSpawn(p, arena.getLobby());
+        updateScoreboard();
+        if (red.isEmpty() && blue.isEmpty()) stop();
+    }
+
+    public void start() {
+        if (running) return;
+        running = true;
+        broadcast(ChatColor.GREEN + "Handball started!");
+        resetScores();
+        updateScoreboard();
+        for (UUID id : red) respawnPlayer(Bukkit.getPlayer(id), arena.getRedSpawn());
+        for (UUID id : blue) respawnPlayer(Bukkit.getPlayer(id), arena.getBlueSpawn());
+    }
+
+    public void stop() {
+        if (!running) return;
+        running = false;
+        broadcast(ChatColor.YELLOW + "Handball stopped.");
+        for (UUID id : red) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) p.setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
+        }
+        for (UUID id : blue) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) p.setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
+        }
+        red.clear();
+        blue.clear();
+        plugin.getHandballManager().removeSession(arena.getName());
+    }
+
+    public void score(String team) {
+        if (!running) return;
+        if (team.equalsIgnoreCase("red")) redScore++;
+        else if (team.equalsIgnoreCase("blue")) blueScore++;
+        updateScoreboard();
+        broadcast(ChatColor.GOLD + "Goal! " + ChatColor.RED + redScore + ChatColor.GRAY + " - " + ChatColor.BLUE + blueScore);
+    }
+
+    public int getRedScore() { return redScore; }
+    public int getBlueScore() { return blueScore; }
+
+    public void moveToTeam(Player p, String team) {
+        UUID id = p.getUniqueId();
+        red.remove(id);
+        blue.remove(id);
+        scoreboard.getTeam("handball_red").removeEntry(p.getName());
+        scoreboard.getTeam("handball_blue").removeEntry(p.getName());
+
+        if (team.equalsIgnoreCase("red")) {
+            red.add(id);
+            scoreboard.getTeam("handball_red").addEntry(p.getName());
+            teleportToSpawn(p, arena.getRedSpawn());
+            p.sendMessage(ChatColor.RED + "You were moved to Red.");
+        } else {
+            blue.add(id);
+            scoreboard.getTeam("handball_blue").addEntry(p.getName());
+            teleportToSpawn(p, arena.getBlueSpawn());
+            p.sendMessage(ChatColor.BLUE + "You were moved to Blue.");
+        }
+        updateScoreboard();
+    }
+
+    private void resetScores() {
+        redScore = 0;
+        blueScore = 0;
+    }
+
+    private void updateScoreboard() {
+        if (objective == null) return;
+        objective.getScore("Red:").setScore(redScore);
+        objective.getScore("Blue:").setScore(blueScore);
+    }
+
+    private void broadcast(String msg) {
+        for (UUID id : red) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) p.sendMessage(msg);
+        }
+        for (UUID id : blue) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) p.sendMessage(msg);
+        }
+    }
+
+    private void teleportToSpawn(Player p, Location loc) {
+        if (loc == null) return;
+        p.teleport(loc);
+    }
+
+    private void respawnPlayer(Player p, Location loc) {
+        if (p == null) return;
+        teleportToSpawn(p, loc);
+        p.setHealth(p.getMaxHealth());
+        p.setFoodLevel(20);
+    }
+
+    @EventHandler
+    public void onQuit(PlayerQuitEvent e) {
+        if (red.contains(e.getPlayer().getUniqueId()) || blue.contains(e.getPlayer().getUniqueId())) {
+            removePlayer(e.getPlayer());
+        }
+    }
+
+    @EventHandler
+    public void onRespawn(PlayerRespawnEvent e) {
+        if (red.contains(e.getPlayer().getUniqueId())) {
+            e.setRespawnLocation(arena.getRedSpawn() != null ? arena.getRedSpawn() : plugin.getLobbyLocation());
+        } else if (blue.contains(e.getPlayer().getUniqueId())) {
+            e.setRespawnLocation(arena.getBlueSpawn() != null ? arena.getBlueSpawn() : plugin.getLobbyLocation());
+        }
+    }
+
+    @EventHandler
+    public void onDamage(EntityDamageEvent e) {
+        if (e.getEntity() instanceof Player p) {
+            if (red.contains(p.getUniqueId()) || blue.contains(p.getUniqueId())) {
+                if (e.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK ||
+                        e.getCause() == EntityDamageEvent.DamageCause.PROJECTILE) {
+                    e.setCancelled(true);
+                }
+            }
+        }
+    }
+}
+package com.example.handball;
+
+import org.bukkit.ChatColor;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Player;
+
+public class HandballCommand implements CommandExecutor {
+
+    private final HandballManager manager;
+
+    public HandballCommand(HandballManager manager) {
+        this.manager = manager;
+    }
+
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!(sender instanceof Player p)) {
+            sender.sendMessage("Only players can use this command.");
+            return true;
+        }
+        if (args.length == 0) {
+            p.sendMessage(ChatColor.GOLD + "Handball commands: /handball join <arena>, leave, start, stop, score");
+            return true;
+        }
+        String sub = args[0].toLowerCase();
+
+        if (sub.equals("join")) {
+            if (args.length < 2) {
+                p.sendMessage(ChatColor.RED + "Usage: /handball join <arena>");
+                return true;
+            }
+            Arena a = manager.getArena(args[1]);
+            if (a == null) {
+                p.sendMessage(ChatColor.RED + "Arena not found.");
+                return true;
+            }
+            manager.joinArena(p, a);
+            return true;
+        }
+
+        if (sub.equals("leave")) {
+            manager.leave(p);
+            return true;
+        }
+
+        if (sub.equals("start")) {
+            Arena a = manager.getPlayerArena(p);
+            if (a == null) { p.sendMessage(ChatColor.RED + "You are not in a game."); return true; }
+            GameSession s = manager.getSession(a.getName());
+            if (s != null) s.start();
+            return true;
+        }
+
+        if (sub.equals("stop")) {
+            Arena a = manager.getPlayerArena(p);
+            if (a == null) { p.sendMessage(ChatColor.RED + "You are not in a game."); return true; }
+            GameSession s = manager.getSession(a.getName());
+            if (s != null) s.stop();
+            return true;
+        }
+
+        if (sub.equals("score")) {
+            Arena a = manager.getPlayerArena(p);
+            if (a == null) { p.sendMessage(ChatColor.RED + "You are not in a game."); return true; }
+            GameSession s = manager.getSession(a.getName());
+            if (s == null) { p.sendMessage(ChatColor.RED + "Game not running."); return true; }
+            p.sendMessage(ChatColor.GOLD + "Score: " + ChatColor.RED + s.getRedScore() + ChatColor.GRAY + " - " + ChatColor.BLUE + s.getBlueScore());
+            return true;
+        }
+
+        return false;
+    }
+}
+package com.example.handball;
+
+import org.bukkit.ChatColor;
+import org.bukkit.Location;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Player;
+
+import java.io.IOException;
+
+public class AdminCommand implements CommandExecutor {
+
+    private final HandballManager manager;
+
+    public AdminCommand(HandballManager manager) {
+        this.manager = manager;
+    }
+
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!(sender instanceof Player p)) {
+            sender.sendMessage("Only players can use this command.");
+            return true;
+        }
+        if (args.length == 0) {
+            p.sendMessage(ChatColor.GOLD + "Admin: /hbadmin createarena <name>, setlobby, setspawn <arena> <red|blue>, setgoal <arena> <red|blue>, setteam <arena> <red|blue> <player>");
+            return true;
+        }
+        String sub = args[0].toLowerCase();
+
+        if (sub.equals("createarena")) {
+            if (args.length < 2) { p.sendMessage(ChatColor.RED + "Usage: /hbadmin createarena <name>"); return true; }
+            Arena a = new Arena(args[1]);
+            try { manager.saveArena(a); p.sendMessage(ChatColor.GREEN + "Arena created: " + a.getName()); }
+            catch (IOException e) { p.sendMessage(ChatColor.RED + "Failed to save arena: " + e.getMessage()); }
+            return true;
+        }
+
+        if (sub.equals("setlobby")) {
+            Location loc = p.getLocation();
+            manager.getPlugin().getConfig().set("lobby.world", loc.getWorld().getName());
+            manager.getPlugin().getConfig().set("lobby.x", loc.getX());
+            manager.getPlugin().getConfig().set("lobby.y", loc.getY());
+            manager.getPlugin().getConfig().set("lobby.z", loc.getZ());
+            manager.getPlugin().getConfig().set("lobby.yaw", loc.getYaw());
+            manager.getPlugin().getConfig().set("lobby.pitch", loc.getPitch());
+            manager.getPlugin().saveConfig();
+            p.sendMessage(ChatColor.GREEN + "Lobby set.");
+            return true;
+        }
+
+        if (sub.equals("setspawn") || sub.equals("setgoal")) {
+            if (args.length < 3) { p.sendMessage(ChatColor.RED + "Usage: /hbadmin " + sub + " <arena> <red|blue>"); return true; }
+            Arena a = manager.getArena(args[1]);
+            if (a == null) { p.sendMessage(ChatColor.RED + "Arena not found."); return true; }
+            Location loc = p.getLocation();
+            if (args[2].equalsIgnoreCase("red")) {
+                if (sub.equals("setspawn")) a.setRedSpawn(loc);
+                else a.setRedGoal(loc);
+            } else if (args[2].equalsIgnoreCase("blue")) {
+                if (sub.equals("setspawn")) a.setBlueSpawn(loc);
+                else a.setBlueGoal(loc);
+            } else {
+                p.sendMessage(ChatColor.RED + "Use red or blue.");
+                return true;
+            }
+            try { manager.saveArena(a); p.sendMessage(ChatColor.GREEN + "Saved " + sub + " for " + a.getName()); }
+            catch (IOException e) { p.sendMessage(ChatColor.RED + "Failed to save arena: " + e.getMessage()); }
+            return true;
+        }
+
+        if (sub.equals("setteam")) {
+            if (args.length < 4) { p.sendMessage(ChatColor.RED + "Usage: /hbadmin setteam <arena> <red|blue> <player>"); return true; }
+            Arena a = manager.getArena(args[1]);
+            if (a == null) { p.sendMessage(ChatColor.RED + "Arena not found."); return true; }
+            Player target = p.getServer().getPlayer(args[3]);
+            if (target == null) { p.sendMessage(ChatColor.RED + "Player not online."); return true; }
+            GameSession s = manager.getSession(a.getName());
+            if (s == null) { p.sendMessage(ChatColor.RED + "Game not running."); return true; }
+            if (args[2].equalsIgnoreCase("red")) s.moveToTeam(target, "red");
+            else if (args[2].equalsIgnoreCase("blue")) s.moveToTeam(target, "blue");
+            else { p.sendMessage(ChatColor.RED + "Use red or blue."); }
+            return true;
+        }
+
+        if (sub.equals("reload")) {
+            manager.loadArenas();
+            p.sendMessage(ChatColor.GREEN + "Arenas reloaded.");
+            return true;
+        }
+        return false;
+    }
+}
