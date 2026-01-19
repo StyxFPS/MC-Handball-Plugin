@@ -1,0 +1,22 @@
+name: Handball
+main: com.example.handball.HandballPlugin
+version: 1.0.0
+api-version: 1.20
+description: Handball minigame with teams, arenas, and scoreboard.
+author: ChatGPT
+commands:
+  handball:
+    description: Main handball command.
+    usage: /<command> <join|leave|start|stop|score>
+    permission: handball.use
+  hbadmin:
+    description: Admin commands for handball.
+    usage: /hbadmin <createarena|setspawn|setgoal|setteam|setlobby|reload>
+    permission: handball.admin
+permissions:
+  handball.use:
+    description: Use handball commands.
+    default: true
+  handball.admin:
+    description: Admin permissions.
+    default: op
