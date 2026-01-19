@@ -1,0 +1,10 @@
+Handball-Plugin/
+  ├─ pom.xml
+  ├─ plugin.yml
+  └─ src/main/java/com/example/handball/
+        ├ HandballPlugin.java
+        ├ HandballManager.java
+        ├ Arena.java
+        ├ GameSession.java
+        ├ HandballCommand.java
+        └ AdminCommand.java
